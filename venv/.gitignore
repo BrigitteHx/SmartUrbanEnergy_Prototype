@@ -1,0 +1,16 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Node (for frontend)
+node_modules/
+.DS_Store
+build/ # Or dist/ for Vue.js
+npm-debug.log*
+yarn-debug.log*
+.parcel-cache/
+
+# IDEs
+.vscode/
