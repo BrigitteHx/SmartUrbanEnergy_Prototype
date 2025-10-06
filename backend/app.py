@@ -4,12 +4,14 @@ from flask_cors import CORS
 import os
 from datetime import datetime, timedelta
 import random
-from sqlalchemy import func, extract, and_ # Voor database aggregatie functies
+from sqlalchemy import func, extract, cast # Importeer cast voor typeconversie
+from sqlalchemy.types import String # Voor typeconversie
 
 app = Flask(__name__)
 CORS(app) 
 
 # Database configuratie
+# LET OP: VERVANG 'JOUW_WACHTWOORD' met het ECHTE wachtwoord van je postgres gebruiker
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or \
                                         'postgresql://postgres:password@localhost:5432/smart_urban_energy_db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -21,10 +23,8 @@ class City(db.Model):
     __tablename__ = 'cities'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
-    # Een stad kan meerdere gebieden/wijken hebben, maar voor nu simplificeren we
-    # dat elke stad een uniek 'gebied' is, of we koppelen Areas direct aan City
-    # Laten we voor nu Area direct aan City koppelen
-    areas = db.relationship('Area', backref='city', lazy=True) 
+    
+    areas = db.relationship('Area', backref='city', lazy=True, cascade='all, delete-orphan') 
 
     def __repr__(self):
         return f"<City {self.name}>"
@@ -32,11 +32,11 @@ class City(db.Model):
 class Area(db.Model):
     __tablename__ = 'areas'
     id = db.Column(db.Integer, primary_key=True)
-    city_id = db.Column(db.Integer, db.ForeignKey('cities.id'), nullable=False) # Nieuwe Foreign Key naar City
+    city_id = db.Column(db.Integer, db.ForeignKey('cities.id'), nullable=False)
     name = db.Column(db.String(100), unique=True, nullable=False) # Nu is dit de wijknaam
     description = db.Column(db.Text)
     
-    lighting_units = db.relationship('LightingUnit', backref='area', lazy=True)
+    lighting_units = db.relationship('LightingUnit', backref='area', lazy=True, cascade='all, delete-orphan')
 
     def __repr__(self):
         return f"<Area {self.name} in City {self.city.name}>"
@@ -49,8 +49,8 @@ class LightingUnit(db.Model):
     location = db.Column(db.String(255))
     power_watt = db.Column(db.Integer)
     
-    consumption_data = db.relationship('EnergyConsumptionData', backref='lighting_unit', lazy=True)
-    recommendations = db.relationship('Recommendation', backref='lighting_unit', lazy=True)
+    consumption_data = db.relationship('EnergyConsumptionData', backref='lighting_unit', lazy=True, cascade='all, delete-orphan')
+    recommendations = db.relationship('Recommendation', backref='lighting_unit', lazy=True, cascade='all, delete-orphan')
 
     def __repr__(self):
         return f"<LightingUnit {self.location} in Area {self.area.name}>"
@@ -69,8 +69,8 @@ class EnergyConsumptionData(db.Model):
 class Recommendation(db.Model):
     __tablename__ = 'recommendations'
     id = db.Column(db.Integer, primary_key=True)
-    area_id = db.Column(db.Integer, db.ForeignKey('areas.id'), nullable=True)
-    lighting_unit_id = db.Column(db.Integer, db.ForeignKey('lighting_units.id'), nullable=True)
+    area_id = db.Column(db.Integer, db.ForeignKey('areas.id'), nullable=True) # Optioneel FK naar Area
+    lighting_unit_id = db.Column(db.Integer, db.ForeignKey('lighting_units.id'), nullable=True) # Optioneel FK naar LightingUnit
     date_generated = db.Column(db.Date, nullable=False)
     title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=False)
@@ -93,9 +93,6 @@ def hello_world():
 def get_cities():
     with app.app_context():
         cities = City.query.all()
-        # In dit prototype gebruiken we Area.name als de 'stad'
-        # dus we sturen een lijst van unieke Area namen terug voor de dropdowns
-        # Dit simuleert dat elke Area een 'stad' is voor de dropdown
         return jsonify([{"id": city.id, "name": city.name} for city in cities])
 
 # Haal gebieden op per stad (voor dit prototype 1-op-1)
@@ -111,33 +108,33 @@ def get_city_area(city_id):
 # Haal energieverbruik op voor een stad/gebied en periode
 @app.route('/energy_data/<int:area_id>')
 def get_energy_data(area_id):
-    period_str = request.args.get('period', 'week') # Default naar 'week'
+    period_str = request.args.get('period', 'week') 
 
     with app.app_context():
         area = Area.query.get(area_id)
         if not area:
             return jsonify({"error": "Area not found"}), 404
         
-        # Bereken de starttijd op basis van de periode
         end_time = datetime.now()
+        
+        # Bepaal aggregatie-interval en labels-formaat
         if period_str == 'day':
             start_time = end_time - timedelta(hours=24)
-            # Voor dagdata willen we uurlijkse aggregatie
-            aggregation_interval = extract('hour', EnergyConsumptionData.timestamp)
-            date_format = '%Y-%m-%dT%H:00:00'
+            # Voor dagdata, aggregeer per uur en formatteer als HH:00
+            # De cast(String) is cruciaal om isoformat() fouten te voorkomen,
+            # omdat extract('hour') een numeriek type kan retourneren.
+            aggregation_interval = cast(extract('hour', EnergyConsumptionData.timestamp), String) 
+            time_format_str = '%H:00:00' # Voor formatteren in Python indien nodig, maar hier SQL output
         elif period_str == 'month':
             start_time = end_time - timedelta(days=30)
-            # Voor maanddata willen we dagelijkse aggregatie
-            aggregation_interval = func.date_trunc('day', EnergyConsumptionData.timestamp)
-            date_format = '%Y-%m-%dT00:00:00'
+            aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'YYYY-MM-DD') # Dagelijkse string format
+            time_format_str = '%Y-%m-%d'
         else: # Default is 'week'
             start_time = end_time - timedelta(days=7)
-            # Voor weekdata willen we dagelijkse aggregatie
-            aggregation_interval = func.date_trunc('day', EnergyConsumptionData.timestamp)
-            date_format = '%Y-%m-%dT00:00:00'
+            aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'YYYY-MM-DD') # Dagelijkse string format
+            time_format_str = '%Y-%m-%d'
 
         # Query voor geaggregeerd verbruik over de geselecteerde periode
-        # We negeren individuele lighting units voor de geaggregeerde grafiek (vereenvoudiging)
         aggregated_consumption = db.session.query(
             aggregation_interval.label('interval_start'),
             func.sum(EnergyConsumptionData.consumption_kwh).label('total_consumption')
@@ -151,45 +148,44 @@ def get_energy_data(area_id):
             'interval_start'
         ).all()
         
-        # Resultaten formatteren
         formatted_data = []
         for row in aggregated_consumption:
-            # Zorg dat de datetime objecten correct naar string worden geconverteerd
-            interval_key = row.interval_start.isoformat() if isinstance(row.interval_start, datetime) else row.interval_start
+            # interval_start is nu al een string door func.to_char of cast(extract)
             formatted_data.append({
-                "timestamp": interval_key,
+                "timestamp": row.interval_start, # Nu is het al een string!
                 "consumption_kwh": row.total_consumption,
             })
         
-        # Voeg hier simulatie voor baseline en inefficiëntie markering toe
-        # Voor dit prototype, simuleren we een verwachte baseline en een 'daglicht piek'
-        
-        # Eenvoudige baseline: gemiddelde consumptie over de gehele periode
-        avg_consumption_per_interval = sum([d['consumption_kwh'] for d in formatted_data]) / len(formatted_data) if formatted_data else 0
+        # --- Simulatie voor inefficiëntie markering (verbruik overdag) ---
+        inefficiency_data_query = db.session.query(
+            aggregation_interval.label('interval_start'),
+            func.sum(EnergyConsumptionData.consumption_kwh).label('inefficient_consumption')
+        ).join(LightingUnit).filter(
+            LightingUnit.area_id == area_id,
+            EnergyConsumptionData.timestamp >= start_time,
+            EnergyConsumptionData.timestamp <= end_time,
+            EnergyConsumptionData.status_recording == 'Daylight_Inefficiency'
+        ).group_by(
+            'interval_start'
+        ).order_by(
+            'interval_start'
+        ).all()
 
-        # Simuleer een inefficiëntie (bijv. 10% extra verbruik overdag)
-        inefficiency_data = []
-        for row in formatted_data:
-            ts = datetime.fromisoformat(row['timestamp']) if isinstance(row['timestamp'], str) else row['timestamp']
-            
-            # Daglicht uren zijn hier de inefficiëntie die we willen spotten
-            is_daytime = ts.hour >= 7 and ts.hour < 18 if period_str == 'day' else False # Check alleen bij dagdata voor uur
-
-            if is_daytime and row['consumption_kwh'] > 0.05: # Als er verbruik is overdag
-                 # Voeg een extra 'inefficiëntie' entry toe voor de visualisatie
-                inefficiency_data.append({
-                    "timestamp": row['timestamp'],
-                    "consumption_kwh": row['consumption_kwh'], # Toon de actuele consumptie die inefficiënt is
-                })
+        inefficiency_markers = []
+        for row in inefficiency_data_query:
+            inefficiency_markers.append({
+                "timestamp": row.interval_start, # Nu is het al een string!
+                "consumption_kwh": row.inefficient_consumption
+            })
         
-        total_consumption_kwh = sum([d['consumption_kwh'] for d in formatted_data])
+        total_consumption_kwh = sum([d['consumption_kwh'] for d in formatted_data]) if formatted_data else 0.0
 
         return jsonify({
             "area_id": area_id,
             "area_name": area.name,
             "total_consumption_kwh": total_consumption_kwh,
             "chart_data": formatted_data,
-            "inefficiency_markers": inefficiency_data # Voor de rode lijn/markering
+            "inefficiency_markers": inefficiency_markers
         })
 
 # --- Haal aanbeveling op voor een stad/gebied ---
@@ -200,8 +196,10 @@ def get_recommendation(area_id):
         if not area:
             return jsonify({"error": "Area not found"}), 404
 
-        # Voor dit prototype, laten we een simpele aanbeveling genereren/ophalen
-        existing_rec = Recommendation.query.filter_by(area_id=area_id, title='Optimaliseer Schakeltijden Openbare Verlichting').first()
+        existing_rec = Recommendation.query.filter_by(
+            area_id=area_id, 
+            title='Optimaliseer Schakeltijden Openbare Verlichting'
+        ).first()
         
         if existing_rec:
             rec_data = {
@@ -209,12 +207,11 @@ def get_recommendation(area_id):
                 "description": existing_rec.description,
                 "potential_savings_kwh": existing_rec.potential_savings_kwh,
                 "potential_savings_euro": existing_rec.potential_savings_euro,
-                "percentage_savings": existing_rec.potential_savings_kwh / 50 * 100 # Simpele berekening voor demo
+                "percentage_savings": existing_rec.potential_savings_kwh / 50 * 100 if existing_rec.potential_savings_kwh else 0 
             }
         else:
-            # Simpele aanbeveling voor de 'Daylight_Inefficiency' die we simuleren
-            potential_kwh_per_month = random.uniform(25.0, 75.0) # Willekeurige besparing per maand in kWh
-            potential_euro_per_month = round(potential_kwh_per_month * 0.40, 2) # Stel 0.40 per kWh
+            potential_kwh_per_month = random.uniform(25.0, 75.0) 
+            potential_euro_per_month = round(potential_kwh_per_month * 0.40, 2)
 
             new_rec = Recommendation(
                 area_id=area_id,
@@ -232,7 +229,7 @@ def get_recommendation(area_id):
                 "description": new_rec.description,
                 "potential_savings_kwh": new_rec.potential_savings_kwh,
                 "potential_savings_euro": new_rec.potential_savings_euro,
-                "percentage_savings": new_rec.potential_savings_kwh / 50 * 100 # Simpele berekening voor demo
+                "percentage_savings": new_rec.potential_savings_kwh / 50 * 100 
             }
 
         return jsonify(rec_data)
@@ -248,35 +245,20 @@ def get_savings_scenario(area_id):
         if not area:
             return jsonify({"error": "Area not found"}), 404
         
-        # Hier kun je een meer geavanceerde simulatie doen
-        # Voor dit prototype: pak de eerder berekende aanbeveling
-        recommendation = Recommendation.query.filter_by(area_id=area_id, title='Optimaliseer Schakeltijden Openbare Verlichting').first()
-        
-        if not recommendation:
-            return jsonify({"error": "No recommendation found to simulate savings"}), 404
-
-        # Bereken de start- en eindtijd zoals in get_energy_data
         end_time = datetime.now()
         if period_str == 'day':
             start_time = end_time - timedelta(hours=24)
-            date_format = '%Y-%m-%dT%H:00:00'
-            interval_delta = timedelta(hours=1)
+            aggregation_interval = extract('hour', EnergyConsumptionData.timestamp)
         elif period_str == 'month':
             start_time = end_time - timedelta(days=30)
-            date_format = '%Y-%m-%dT00:00:00'
-            interval_delta = timedelta(days=1)
+            aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'YYYY-MM-DD')
         else: # Default is 'week'
             start_time = end_time - timedelta(days=7)
-            date_format = '%Y-%m-%dT00:00:00'
-            interval_delta = timedelta(days=1)
+            aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'YYYY-MM-DD')
             
-        # Haal de actuele chart data op (simpelweg de basisdata zonder aggregatie)
-        # Voor een echte simulatie zou je de data eerst aggregeren
+        # Haal het actuele verbruiksprofiel op (deze wordt verminderd met de besparing)
         actual_consumption_query = db.session.query(
-            func.date_trunc(
-                'hour' if period_str == 'day' else 'day',
-                EnergyConsumptionData.timestamp
-            ).label('interval_start'),
+            aggregation_interval.label('interval_start'),
             func.sum(EnergyConsumptionData.consumption_kwh).label('total_consumption')
         ).join(LightingUnit).filter(
             LightingUnit.area_id == area_id,
@@ -288,54 +270,67 @@ def get_savings_scenario(area_id):
             'interval_start'
         ).all()
         
-        actual_consumption_map = {row.interval_start: row.total_consumption for row in actual_consumption_query}
+        actual_consumption_map = {}
+        for row in actual_consumption_query:
+            if isinstance(row.interval_start, datetime): # Check datetime als fallback
+                key = row.interval_start.isoformat()
+            elif isinstance(row.interval_start, (int, float)): # Numerieke uren
+                key = f"{int(row.interval_start):02d}:00:00"
+            else: # Als het al een string is (door func.to_char)
+                key = str(row.interval_start)
+            actual_consumption_map[key] = row.total_consumption
 
-        # Simuleer de besparing per interval
+
+        inefficient_consumption_query = db.session.query(
+            aggregation_interval.label('interval_start'),
+            func.sum(EnergyConsumptionData.consumption_kwh).label('inefficient_kwh')
+        ).join(LightingUnit).filter(
+            LightingUnit.area_id == area_id,
+            EnergyConsumptionData.timestamp >= start_time,
+            EnergyConsumptionData.timestamp <= end_time,
+            EnergyConsumptionData.status_recording == 'Daylight_Inefficiency'
+        ).group_by(
+            'interval_start'
+        ).order_by(
+            'interval_start'
+        ).all()
+        
+        inefficient_consumption_map = {}
+        for row in inefficient_consumption_query:
+            if isinstance(row.interval_start, datetime): # Check datetime als fallback
+                key = row.interval_start.isoformat()
+            elif isinstance(row.interval_start, (int, float)): # Numerieke uren
+                key = f"{int(row.interval_start):02d}:00:00"
+            else: # Als het al een string is (door func.to_char)
+                key = str(row.interval_start)
+            inefficient_consumption_map[key] = row.inefficient_kwh
+
+        # Simuleer de besparing per interval: trek het inefficiënte deel af
         savings_scenario_data = []
-        current_interval_time = start_time
-        while current_interval_time <= end_time:
-            actual_kwh = actual_consumption_map.get(current_interval_time, 0.0)
+        for interval_start_str, actual_kwh in actual_consumption_map.items():
+            inefficient_kwh_for_interval = inefficient_consumption_map.get(interval_start_str, 0.0)
             
-            # Hier de logica van de aanbeveling toepassen
-            # Voor ons prototype: als er overdag verbruik was (inefficiëntie), verwijderen we dat
-            # We hadden Hogedruk Natrium lampen die overdag aan stonden
-            # Simuleer dat we 1/3 van het totale verbruik (door 1 op 3 inefficiënte lampen) overdag kunnen elimineren
-            # Dit is een GROVE SIMULATIE!
-
-            # Zoek echte LightingUnits die de 'Daylight_Inefficiency' status hadden
-            daylight_ineff_consumption_for_interval = db.session.query(
-                func.sum(EnergyConsumptionData.consumption_kwh)
-            ).join(LightingUnit).filter(
-                LightingUnit.area_id == area_id,
-                EnergyConsumptionData.timestamp == current_interval_time,
-                EnergyConsumptionData.status_recording == 'Daylight_Inefficiency'
-            ).scalar() or 0.0 # Sum of consumption from inefficient units at this hour
-            
-            # De bespaarde hoeveelheid voor dit interval
-            saved_kwh_this_interval = daylight_ineff_consumption_for_interval # Simuleer dat we dit deel elimineren
-            
-            new_kwh = actual_kwh - saved_kwh_this_interval
-            if new_kwh < 0: new_kwh = 0 # Verbruik kan niet negatief zijn
+            new_kwh = actual_kwh - inefficient_kwh_for_interval
+            if new_kwh < 0: new_kwh = 0
 
             savings_scenario_data.append({
-                "timestamp": current_interval_time.isoformat(),
+                "timestamp": interval_start_str,
                 "consumption_kwh": new_kwh,
             })
-            current_interval_time += interval_delta
 
         return jsonify(savings_scenario_data)
-
 
 
 if __name__ == '__main__':
     with app.app_context():
         print("Checking/Creating database tables...")
-        # db.drop_all() # UNCOMMENT DIT ALLEEN ALS JE ALLE TABELLEN EN DATA WIL WISSEN EN OPNIEUW BEGINNEN
+        # --- BELANGRIJK: DEZE LIJN VERWIJDERT AL JE TABELLEN EN DATA.
+        # --- COMMENT HET UIT NA DE EERSTE SUCCESVOLLE RUN ALS JE NIET ALTIJD WIL RESETTEN!
+        db.drop_all() 
         db.create_all()
         print("Tables checked/created.")
 
         # --- Demo Data Generatie ---
-        # Definieer de Nederlandse provinciale hoofdsteden
         dutch_capitals = [
             "Amsterdam", "Rotterdam", "Den Haag", "Utrecht", "Groningen", 
             "Leeuwarden", "Arnhem", "Zwolle", "Middelburg", "Maastricht", 
@@ -347,8 +342,7 @@ if __name__ == '__main__':
             for capital_name in dutch_capitals:
                 city = City(name=capital_name)
                 db.session.add(city)
-                db.session.commit() # Commit na elke stad om ID te krijgen
-                # Voor dit prototype, elke stad is zijn eigen 'area' voor de lampen
+                db.session.commit()
                 area = Area(city_id=city.id, name=f'Centrum {capital_name}', description=f'Hoofdgebied van {capital_name}')
                 db.session.add(area)
             db.session.commit()
@@ -356,23 +350,19 @@ if __name__ == '__main__':
         else:
             print("City and Area data already exists, skipping demo data insertion.")
 
-        # Genereer LightingUnits en EnergyConsumptionData voor elke Area
         if not LightingUnit.query.first():
             print("Adding demo LightingUnit and EnergyConsumptionData for all areas...")
             all_areas = Area.query.all()
             
-            # Simulatie start vanaf 30 dagen terug om voldoende data voor 'month' en 'week' te hebben
             start_simulation_time = datetime.now() - timedelta(days=30) 
 
             for area in all_areas:
-                # Elke area krijgt 3 lantaarnpalen
                 lu1 = LightingUnit(area=area, unit_type='LED', location=f'Hoofdstraat {area.name}', power_watt=50)
                 lu2 = LightingUnit(area=area, unit_type='LED', location=f'Kerklaan {area.name}', power_watt=50)
                 lu3 = LightingUnit(area=area, unit_type='Hogedruk Natrium', location=f'Marktplein {area.name}', power_watt=100)
                 db.session.add_all([lu1, lu2, lu3])
                 db.session.commit()
 
-                # Simuleer 30 dagen data, uur per uur voor elke lantaarnpaal
                 for lu in [lu1, lu2, lu3]:
                     current_time = start_simulation_time
                     while current_time <= datetime.now():
