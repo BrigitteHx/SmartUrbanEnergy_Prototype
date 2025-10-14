@@ -116,15 +116,12 @@ def get_energy_data(area_id):
         # Bepaal start_time en aggregation_interval/time_format_str
         if period_str == 'day':
             start_time = end_time - timedelta(hours=24)
-            # Voor 'day', extraheer het uur als string 'HH:00:00'
             aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'HH24:00:00')
         elif period_str == 'month':
             start_time = end_time - timedelta(days=30)
-            # Voor 'month', formatteer als 'YYYY-MM-DD'
             aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'YYYY-MM-DD')
         else: # Default is 'week'
             start_time = end_time - timedelta(days=7)
-            # Voor 'week', formatteer als 'YYYY-MM-DD'
             aggregation_interval = func.to_char(EnergyConsumptionData.timestamp, 'YYYY-MM-DD')
 
         # Query voor geaggregeerd verbruik over de geselecteerde periode
@@ -143,7 +140,6 @@ def get_energy_data(area_id):
         
         formatted_data = []
         for row in aggregated_consumption:
-            # interval_start is nu al een string door func.to_char
             formatted_data.append({
                 "timestamp": row.interval_start, 
                 "consumption_kwh": row.total_consumption,
