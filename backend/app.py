@@ -28,13 +28,13 @@ def hello_world():
 if __name__ == '__main__':
     with app.app_context():
         print("Starting database operations...")
-        # BELANGRIJK: UNCOMMENT db.drop_all() ALLEEN ALS JE DE DB WIL RESETTEN !!!
-        # db.drop_all() 
-        db.create_all() # Zorgt dat alle tabellen bestaan (geen migraties hier, alleen aanmaken)
+        # --- BELANGRIJK: ZORG DAT DEZE LIJN ALLEEN AANSTAAT ALS JE ECHT WIL RESETTEN! ---
+        # db.drop_all() # zet uit 
+        db.create_all() 
         print("Database tables checked/created.")
         
-        # Roep de seed functie aan om data te genereren
-        seed_initial_data(app)
+        # Roep de seed functie aan met de 'app' instantie
+        # seed_initial_data(app) # zet uit
         print("Demo data seeding complete.")
         
     app.run(debug=True)
