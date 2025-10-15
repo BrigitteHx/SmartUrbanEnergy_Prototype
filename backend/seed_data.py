@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 import random
+
+from sqlalchemy import func
 from database import db
 from models import City, Area, LightingUnit, EnergyConsumptionData, Recommendation
 
